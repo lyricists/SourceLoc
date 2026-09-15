@@ -1,10 +1,5 @@
 """Plot scout-wise decoding with joint scout-by-time cluster inference.
 
-The decoder output contains one cross-validated balanced-accuracy value for
-every scout, time point, and subject. Trial/pseudotrial and fold averaging have
-already occurred in ``svm_source_scout.py``; subjects are therefore the
-independent observations used for group-level inference.
-
 Each requested group is analyzed with one one-tailed, one-sample
 spatiotemporal cluster permutation test on accuracy minus 50% chance. The
 maximum-cluster null distribution controls family-wise error jointly across
@@ -67,7 +62,7 @@ except ModuleNotFoundError:
 BASE_DIRECTORY = Path(
     "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/SourceLoc"
 )
-DEFAULT_INPUT = BASE_DIRECTORY / "Results" / "svmDecoding_scout_3pc.pkl"
+DEFAULT_INPUT = BASE_DIRECTORY / "Results" / "svmDecoding_scout_3pc_fold_pca.pkl"
 DEFAULT_ATLAS = (
     BASE_DIRECTORY.parent.parent
     / "Data"

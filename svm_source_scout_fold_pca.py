@@ -1,8 +1,7 @@
 """Leakage-controlled scout-wise source SVM decoding.
 
-This module combines the source-projection logic from ``sourceLocalization.py``
-with the decoding logic from ``svm_source_scout.py`` so that PCA is fitted
-inside each subject/scout cross-validation fold using training trials only.
+PCA is fitted inside each subject/scout cross-validation fold using training 
+trials only.
 
 The inverse kernel and anatomical scout definition are fixed, label-independent
 transforms and are therefore applied before the fold-specific PCA. For every
@@ -12,9 +11,6 @@ Each fold then follows this sequence:
     training-trial PCA fit -> train/test PCA transform -> per-trial baseline
     z-score -> separate train/test pseudotrial construction -> train-derived
     feature scaling -> linear SVM at each time point
-
-Each completed subject/scout is atomically checkpointed. The default output is
-separate from the original result so both analyses remain available.
 """
 
 from __future__ import annotations

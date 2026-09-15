@@ -4,8 +4,7 @@ Expected input shape:
     PCs x scouts x time points x trials x subjects
 
 The decoder processes one subject and one fold at a time. Augmented arrays are
-discarded immediately after their fold is decoded, and each completed subject
-is checkpointed so an interrupted analysis can resume safely.
+discarded immediately after their fold is decoded.
 """
 
 import os
