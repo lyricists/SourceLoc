@@ -68,7 +68,7 @@ def cluster_based_permutation_test_timeseries(
         threshold=threshold,
         tail=tail,
         out_type="indices",
-        seed=seed,
+        rng=seed,
         n_jobs=n_jobs,
     )
 

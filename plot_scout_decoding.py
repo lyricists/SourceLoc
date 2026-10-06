@@ -3,15 +3,8 @@
 Each requested group is analyzed with one one-tailed, one-sample
 spatiotemporal cluster permutation test on accuracy minus 50% chance. The
 maximum-cluster null distribution controls family-wise error jointly across
-all selected scouts and time points within that group. Groups are separate
-inferential families; this script does not correct across groups and does not
-test between-group differences.
+all selected scouts and time points within that group.
 
-By default, scouts have no spatial edges because the atlas file contains parcel
-memberships but no cortical mesh faces. Thus, clusters extend through time
-within a scout, while the permutation maximum still corrects across scouts.
-An anatomically valid scout adjacency matrix can be supplied to permit clusters
-to extend across neighboring parcels.
 """
 
 from __future__ import annotations
@@ -22,13 +15,19 @@ import hashlib
 import os
 import pickle
 import re
-import sys
 import tempfile
 from pathlib import Path
 
 import mat73
 import matplotlib
 import numpy as np
+from pypdf import PdfReader, PdfWriter
+
+# Keep MNE's optional JIT cache in a writable location during permutation tests.
+NUMBA_CACHE_DIRECTORY = Path(tempfile.gettempdir()) / "mne_numba_cache"
+NUMBA_CACHE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("NUMBA_CACHE_DIR", str(NUMBA_CACHE_DIRECTORY))
+
 from mne.stats import spatio_temporal_cluster_1samp_test
 from scipy import sparse
 from scipy.stats import t as t_distribution
@@ -36,46 +35,19 @@ from scipy.stats import t as t_distribution
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-try:
-    from pypdf import PdfReader, PdfWriter
-except ModuleNotFoundError:
-    # Codex's bundled artifact runtime includes pypdf even when the scientific
-    # Python environment used for MNE does not. Append (rather than prepend)
-    # the pure-Python package location so NumPy/SciPy continue to come from the
-    # active scientific environment.
-    bundled_site_packages = (
-        Path.home()
-        / ".cache"
-        / "codex-runtimes"
-        / "codex-primary-runtime"
-        / "dependencies"
-        / "python"
-        / "lib"
-        / "python3.12"
-        / "site-packages"
-    )
-    if bundled_site_packages.exists():
-        sys.path.append(str(bundled_site_packages))
-    from pypdf import PdfReader, PdfWriter
-
-
-BASE_DIRECTORY = Path(
-    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/SourceLoc"
-)
-DEFAULT_INPUT = BASE_DIRECTORY / "Results" / "svmDecoding_scout_3pc_fold_pca.pkl"
+BASE_DIRECTORY = Path("/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/SourceLoc")
+DEFAULT_INPUT = BASE_DIRECTORY / "Results" / "svmDecoding_scout_con_Int.pkl"
 DEFAULT_ATLAS = (
-    BASE_DIRECTORY.parent.parent
-    / "Data"
-    / "Preprocessed data"
-    / "DKT_scout.mat"
+    BASE_DIRECTORY.parent.parent / "Data" / "Preprocessed data" / "DKT_scout.mat"
 )
-DEFAULT_OUTPUT = BASE_DIRECTORY / "Results" / "CBP_Chance_scout_3pc"
+DEFAULT_OUTPUT = BASE_DIRECTORY / "Results" / "CBP_Chance_scout_con_Int"
 
 T_START_MS = -200
-T_END_MS = 1000
+T_EPOCH_END_EXCLUSIVE_MS = 1000
 SAMPLING_RATE_HZ = 250
+T_END_MS = T_EPOCH_END_EXCLUSIVE_MS - 1000 / SAMPLING_RATE_HZ
 CHANCE_LEVEL = 0.5
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 GROUP_DEFINITIONS = (
     ("all", "All", None),
@@ -191,14 +163,28 @@ def load_scout_labels(path: Path, n_scouts: int) -> list[str]:
     return labels
 
 
-def make_time_vector(n_times: int) -> np.ndarray:
+def make_time_vector(
+    n_times: int, recorded_times: np.ndarray | None = None
+) -> np.ndarray:
     step_ms = 1000 / SAMPLING_RATE_HZ
-    times = np.arange(T_START_MS, T_END_MS + step_ms, step_ms)
+    times = np.arange(T_START_MS, T_EPOCH_END_EXCLUSIVE_MS, step_ms)
     if times.size != n_times:
         raise ValueError(
-            f"Expected {times.size} time points from {T_START_MS} to "
-            f"{T_END_MS} ms, but decodeScore contains {n_times}."
+            f"Expected {times.size} samples in [{T_START_MS}, "
+            f"{T_EPOCH_END_EXCLUSIVE_MS}) ms (last sample {times[-1]:g} ms), "
+            f"but decodeScore contains {n_times}."
         )
+    if recorded_times is not None:
+        recorded = np.asarray(recorded_times, dtype=np.float64)
+        if (
+            recorded.shape != times.shape
+            or not np.isfinite(recorded).all()
+            or not np.allclose(recorded, times, rtol=0, atol=1e-6)
+        ):
+            raise ValueError(
+                "Decoder times_ms does not match the 250 Hz " "[-200, 1000) ms epoch."
+            )
+        return recorded
     return times
 
 
@@ -277,9 +263,7 @@ def cluster_to_mask(cluster: object, shape: tuple[int, int]) -> np.ndarray:
 
     values = np.asarray(cluster)
     if values.shape != shape:
-        raise ValueError(
-            f"Unexpected cluster shape {values.shape}; expected {shape}."
-        )
+        raise ValueError(f"Unexpected cluster shape {values.shape}; expected {shape}.")
     return values.astype(bool, copy=False)
 
 
@@ -345,9 +329,7 @@ def compute_group_statistics(
         dtype=np.float64,
     )
     degrees_of_freedom = centered_scores.shape[0] - 1
-    threshold = float(
-        t_distribution.ppf(1.0 - args.threshold_p, degrees_of_freedom)
-    )
+    threshold = float(t_distribution.ppf(1.0 - args.threshold_p, degrees_of_freedom))
 
     t_observed, clusters, cluster_p_values, null_distribution = (
         spatio_temporal_cluster_1samp_test(
@@ -363,7 +345,7 @@ def compute_group_statistics(
             out_type="indices",
             check_disjoint=True,
             buffer_size=args.buffer_size,
-            seed=args.seed,
+            rng=args.seed,
             n_jobs=args.n_jobs,
             verbose=False,
         )
@@ -373,9 +355,7 @@ def compute_group_statistics(
     significant_mask = np.zeros(expected_shape, dtype=bool)
     significant_clusters = []
 
-    for cluster_index, (cluster, p_value) in enumerate(
-        zip(clusters, cluster_p_values)
-    ):
+    for cluster_index, (cluster, p_value) in enumerate(zip(clusters, cluster_p_values)):
         if p_value >= args.cluster_alpha:
             continue
         mask = cluster_to_mask(cluster, expected_shape)
@@ -489,9 +469,7 @@ def write_cluster_summary(
             times = statistics["times_ms"]
             for cluster in statistics["significant_clusters"]:
                 mask = cluster["mask"]
-                for local_scout, scout_index in enumerate(
-                    statistics["scout_indices"]
-                ):
+                for local_scout, scout_index in enumerate(statistics["scout_indices"]):
                     for interval_number, run in enumerate(
                         contiguous_runs(mask[:, local_scout]), start=1
                     ):
@@ -506,9 +484,7 @@ def write_cluster_summary(
                                 "cluster_n_scouts": cluster["n_scouts"],
                                 "scout_index": int(scout_index),
                                 "scout_number": int(scout_index) + 1,
-                                "scout_label": statistics["scout_labels"][
-                                    local_scout
-                                ],
+                                "scout_label": statistics["scout_labels"][local_scout],
                                 "interval_number": interval_number,
                                 "start_ms": float(times[run[0]]),
                                 "end_ms": float(times[run[-1]]),
@@ -548,18 +524,24 @@ def create_multipage_figure(
         print(f"Figure already exists; not rebuilding: {destination}")
         return
 
-    all_means = np.concatenate(
-        [
-            statistics["mean_accuracy"].ravel()
-            for statistics in statistics_by_group.values()
-        ]
-    ) * 100
-    all_sems = np.concatenate(
-        [
-            statistics["sem_accuracy"].ravel()
-            for statistics in statistics_by_group.values()
-        ]
-    ) * 100
+    all_means = (
+        np.concatenate(
+            [
+                statistics["mean_accuracy"].ravel()
+                for statistics in statistics_by_group.values()
+            ]
+        )
+        * 100
+    )
+    all_sems = (
+        np.concatenate(
+            [
+                statistics["sem_accuracy"].ravel()
+                for statistics in statistics_by_group.values()
+            ]
+        )
+        * 100
+    )
     lower_limit = min(45.0, float(np.floor(np.min(all_means - all_sems) - 1)))
     upper_limit = max(65.0, float(np.ceil(np.max(all_means + all_sems) + 1)))
 
@@ -586,9 +568,7 @@ def create_multipage_figure(
 
             for row, scout_index in enumerate(page_scouts):
                 local_scout = page_start + row
-                for column, (group_key, group_label, _) in enumerate(
-                    group_definitions
-                ):
+                for column, (group_key, group_label, _) in enumerate(group_definitions):
                     statistics = statistics_by_group[group_key]
                     axis = axes[row, column]
                     times = statistics["times_ms"]
@@ -691,7 +671,7 @@ def main() -> None:
 
     scores, subject_groups, decoder_result = load_decoder_result(args.input)
     n_scouts, n_times, n_subjects = scores.shape
-    times = make_time_vector(n_times)
+    times = make_time_vector(n_times, decoder_result.get("times_ms"))
     scout_labels = load_scout_labels(args.atlas, n_scouts)
 
     scout_indices = list(range(n_scouts)) if args.scouts is None else args.scouts
@@ -729,8 +709,7 @@ def main() -> None:
     print(
         "Groups: "
         + ", ".join(
-            f"{label}={group_indices[key].size}"
-            for key, label, _ in group_definitions
+            f"{label}={group_indices[key].size}" for key, label, _ in group_definitions
         )
     )
     print(
@@ -759,8 +738,7 @@ def main() -> None:
             adjacency=adjacency,
         )
         cache_path = (
-            statistics_directory
-            / f"group_{group_key}_scouts_{selection_digest}.pkl"
+            statistics_directory / f"group_{group_key}_scouts_{selection_digest}.pkl"
         )
         print(f"Analyzing {group_label} (n={subject_indices.size})...")
         statistics, loaded = load_or_compute_group(
@@ -806,11 +784,11 @@ def main() -> None:
         "decode_parameters": decoder_result.get("parameters"),
         "score_shape": scores.shape,
         "time_range_ms": (float(times[0]), float(times[-1])),
+        "epoch_end_exclusive_ms": T_EPOCH_END_EXCLUSIVE_MS,
         "sampling_rate_hz": SAMPLING_RATE_HZ,
         "groups_analyzed": [definition[0] for definition in group_definitions],
         "group_sizes": {
-            label: int(group_indices[key].size)
-            for key, label, _ in group_definitions
+            label: int(group_indices[key].size) for key, label, _ in group_definitions
         },
         "scout_indices": scout_indices,
         "n_scouts_processed": len(scout_indices),

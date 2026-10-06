@@ -37,7 +37,7 @@ DATA_DIRECTORY = BASE_DIRECTORY.parent.parent / "Data"
 PREPROCESSED_DIRECTORY = DATA_DIRECTORY / "Preprocessed data"
 BEHAVIOR_DIRECTORY = DATA_DIRECTORY / "Behavior"
 
-DEFAULT_EEG = PREPROCESSED_DIRECTORY / "Data_sen_lepoch.pkl"
+DEFAULT_EEG = PREPROCESSED_DIRECTORY / "Data_sen_bl.pkl"
 DEFAULT_ATLAS = PREPROCESSED_DIRECTORY / "DKT_scout.mat"
 DEFAULT_TMATRIX = PREPROCESSED_DIRECTORY / "tMatrix.pkl"
 DEFAULT_SUBJECT_INDEX = BEHAVIOR_DIRECTORY / "subject_index.mat"
@@ -47,8 +47,9 @@ DEFAULT_OUTPUT = (
 )
 
 FS = 250
+
 T_START_MS = -200
-T_END_ORIGINAL_MS = 1500
+# Analysis keeps input samples up to this time (all of them for a shorter epoch).
 ANALYSIS_END_MS = 1000
 BASELINE_START_MS = -200
 BASELINE_END_MS = 0
@@ -216,24 +217,21 @@ class FoldPCAScoutDecoder:
         if len(self.scout_labels) != self.n_scouts:
             raise ValueError("Scout label count does not match the atlas.")
 
-        original_times = np.arange(
-            T_START_MS, T_END_ORIGINAL_MS, 1000 / FS, dtype=float
+        original_times = (
+            T_START_MS + np.arange(self.n_times_original, dtype=float) * 1000 / FS
         )
-        if original_times.size != self.n_times_original:
-            raise ValueError(
-                f"Expected {original_times.size} original time points but EEG has "
-                f"{self.n_times_original}."
-            )
-        self.time_indices = np.flatnonzero(
-            (original_times >= T_START_MS) & (original_times <= ANALYSIS_END_MS)
-        )
+        self.time_indices = np.flatnonzero(original_times <= ANALYSIS_END_MS)
         self.times = original_times[self.time_indices]
         self.n_times = self.times.size
         self.baseline_indices = np.flatnonzero(
             (self.times >= BASELINE_START_MS) & (self.times <= BASELINE_END_MS)
         )
-        if self.n_times != 301 or self.baseline_indices.size == 0:
-            raise ValueError("Unexpected analysis or baseline time-vector length.")
+        if self.baseline_indices.size == 0 or self.times[-1] <= BASELINE_END_MS:
+            raise ValueError(
+                f"EEG epoch {original_times[0]:g} to {original_times[-1]:g} ms does "
+                f"not cover the baseline {BASELINE_START_MS} to {BASELINE_END_MS} ms "
+                "plus post-stimulus samples."
+            )
 
         self.scout_source_rows = []
         for vertices in self.scout_vertices:
@@ -243,6 +241,11 @@ class FoldPCAScoutDecoder:
             self.scout_source_rows.append(vertex_to_xyz_rows(vertices_0based))
 
         print("Sensor EEG shape:", self.eeg_data.shape)
+        print(
+            f"EEG epoch: {original_times[0]:g} to {original_times[-1]:g} ms; "
+            f"analysis window: {self.times[0]:g} to {self.times[-1]:g} ms "
+            f"({self.n_times} samples)"
+        )
         print(
             "Analysis shape components:",
             f"PC={self.args.n_pcs}, scout={self.n_scouts}, time={self.n_times},",
