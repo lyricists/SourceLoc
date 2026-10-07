@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=RESULTS / "source_response_norm" / "evoked_kernel",
+        default=RESULTS / "source_response_norm" / "evoked_baseline-zscore",
     )
     parser.add_argument(
         "--intention-cbp-dir", type=Path, default=RESULTS / "CBP_Chance_scout_con_Int"
