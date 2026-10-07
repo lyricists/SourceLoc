@@ -1,6 +1,6 @@
 """Leakage-controlled scout-wise source SVM decoding.
 
-PCA is fitted inside each subject/scout cross-validation fold using training 
+PCA is fitted inside each subject/scout cross-validation fold using training
 trials only.
 
 The inverse kernel and anatomical scout definition are fixed, label-independent
@@ -29,10 +29,7 @@ from sklearn.svm import SVC
 from threadpoolctl import threadpool_limits
 from tqdm import tqdm
 
-
-BASE_DIRECTORY = Path(
-    "/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/SourceLoc"
-)
+BASE_DIRECTORY = Path("/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/SourceLoc")
 DATA_DIRECTORY = BASE_DIRECTORY.parent.parent / "Data"
 PREPROCESSED_DIRECTORY = DATA_DIRECTORY / "Preprocessed data"
 BEHAVIOR_DIRECTORY = DATA_DIRECTORY / "Behavior"
@@ -42,9 +39,7 @@ DEFAULT_ATLAS = PREPROCESSED_DIRECTORY / "DKT_scout.mat"
 DEFAULT_TMATRIX = PREPROCESSED_DIRECTORY / "tMatrix.pkl"
 DEFAULT_SUBJECT_INDEX = BEHAVIOR_DIRECTORY / "subject_index.mat"
 DEFAULT_SENTIMENT_INDEX = BEHAVIOR_DIRECTORY / "senIdx_congruent.pkl"
-DEFAULT_OUTPUT = (
-    BASE_DIRECTORY / "Results" / "svmDecoding_scout_3pc_fold_pca.pkl"
-)
+DEFAULT_OUTPUT = BASE_DIRECTORY / "Results" / "svmDecoding_scout_3pc_fold_pca.pkl"
 
 FS = 250
 
@@ -53,8 +48,6 @@ T_START_MS = -200
 ANALYSIS_END_MS = 1000
 BASELINE_START_MS = -200
 BASELINE_END_MS = 0
-EPSILON = 1e-8
-ALGORITHM_VERSION = 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,9 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atlas", type=Path, default=DEFAULT_ATLAS)
     parser.add_argument("--tmatrix", type=Path, default=DEFAULT_TMATRIX)
     parser.add_argument("--subject-index", type=Path, default=DEFAULT_SUBJECT_INDEX)
-    parser.add_argument(
-        "--sentiment-index", type=Path, default=DEFAULT_SENTIMENT_INDEX
-    )
+    parser.add_argument("--sentiment-index", type=Path, default=DEFAULT_SENTIMENT_INDEX)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--k-fold", type=int, default=5)
     parser.add_argument("--trial-num", type=int, default=125)
@@ -281,7 +272,6 @@ class FoldPCAScoutDecoder:
         self.checkpoint_directory.mkdir(parents=True, exist_ok=True)
 
         self.parameters = {
-            "algorithm_version": ALGORITHM_VERSION,
             "k_fold": self.args.k_fold,
             "Trial_num": self.args.trial_num,
             "avg_num": self.args.avg_num,
@@ -461,7 +451,8 @@ class FoldPCAScoutDecoder:
         baseline = pc_data[:, self.baseline_indices, :]
         baseline_mean = baseline.mean(axis=1, keepdims=True, dtype=np.float32)
         baseline_std = baseline.std(axis=1, keepdims=True, dtype=np.float32)
-        baseline_std[baseline_std < EPSILON] = EPSILON
+        if not np.isfinite(baseline_std).all() or np.any(baseline_std <= 0):
+            raise ValueError("Zero or non-finite baseline SD in PC scores.")
         pc_data -= baseline_mean
         pc_data /= baseline_std
         return pc_data
@@ -484,9 +475,7 @@ class FoldPCAScoutDecoder:
                 replace=True,
             )
             selected_data = np.take(pc_data, selected_trials, axis=2)
-            output[:, :, start:stop] = selected_data.mean(
-                axis=-1, dtype=np.float32
-            )
+            output[:, :, start:stop] = selected_data.mean(axis=-1, dtype=np.float32)
         return output
 
     def _augment_fold(
@@ -522,9 +511,7 @@ class FoldPCAScoutDecoder:
         )
 
     @staticmethod
-    def _standardize_fold(
-        train_data: np.ndarray, test_data: np.ndarray
-    ) -> None:
+    def _standardize_fold(train_data: np.ndarray, test_data: np.ndarray) -> None:
         mean = train_data.mean(axis=-1, keepdims=True, dtype=np.float32)
         scale = train_data.std(axis=-1, keepdims=True, dtype=np.float32)
         scale[scale == 0] = 1.0
@@ -533,9 +520,7 @@ class FoldPCAScoutDecoder:
         test_data -= mean
         test_data /= scale
 
-    def _decode_fold(
-        self, train_data: np.ndarray, test_data: np.ndarray
-    ) -> np.ndarray:
+    def _decode_fold(self, train_data: np.ndarray, test_data: np.ndarray) -> np.ndarray:
         self._standardize_fold(train_data, test_data)
         scores = np.empty(self.n_times, dtype=np.float32)
         y_train = np.concatenate(
@@ -555,15 +540,9 @@ class FoldPCAScoutDecoder:
             )
             classifier.fit(train_data[:, time_index, :].T, y_train)
             prediction = classifier.predict(test_data[:, time_index, :].T)
-            positive_accuracy = np.mean(
-                prediction[: self.n_test_per_class] == 0
-            )
-            negative_accuracy = np.mean(
-                prediction[self.n_test_per_class :] == 1
-            )
-            scores[time_index] = 0.5 * (
-                positive_accuracy + negative_accuracy
-            )
+            positive_accuracy = np.mean(prediction[: self.n_test_per_class] == 0)
+            negative_accuracy = np.mean(prediction[self.n_test_per_class :] == 1)
+            scores[time_index] = 0.5 * (positive_accuracy + negative_accuracy)
         return scores
 
     def _decode_subject_scout(
@@ -586,14 +565,10 @@ class FoldPCAScoutDecoder:
             )
 
         source_2d = kernel[source_rows, :] @ eeg_2d
-        source_data = source_2d.reshape(
-            source_rows.size, self.n_times, self.n_trials
-        )
+        source_data = source_2d.reshape(source_rows.size, self.n_times, self.n_trials)
         del source_2d
 
-        fold_scores = np.empty(
-            (self.args.k_fold, self.n_times), dtype=np.float32
-        )
+        fold_scores = np.empty((self.args.k_fold, self.n_times), dtype=np.float32)
         explained_variance_ratio = np.empty(
             (self.args.k_fold, self.args.n_pcs), dtype=np.float32
         )
@@ -615,9 +590,7 @@ class FoldPCAScoutDecoder:
                     fold,
                 )
             )
-            pc_data = self._transform_all_trials(
-                source_data, pca_mean, pca_components
-            )
+            pc_data = self._transform_all_trials(source_data, pca_mean, pca_components)
             self._baseline_zscore(pc_data)
 
             # Reinitializing with the same subject/fold seed for every scout
@@ -655,9 +628,7 @@ class FoldPCAScoutDecoder:
             / f"scout_{scout_index:03d}.pkl"
         )
 
-    def _load_checkpoint(
-        self, subject_index: int, scout_index: int
-    ) -> dict | None:
+    def _load_checkpoint(self, subject_index: int, scout_index: int) -> dict | None:
         if not self.args.resume:
             return None
         path = self._checkpoint_path(subject_index, scout_index)
@@ -755,9 +726,9 @@ class FoldPCAScoutDecoder:
                 decode_scores[output_scout_index, :, output_subject_index] = result[
                     "decodeScore"
                 ]
-                fold_scores[
-                    :, output_scout_index, :, output_subject_index
-                ] = result["foldDecodeScore"]
+                fold_scores[:, output_scout_index, :, output_subject_index] = result[
+                    "foldDecodeScore"
+                ]
                 pca_explained_variance[
                     :, output_scout_index, :, output_subject_index
                 ] = result["pcaExplainedVarianceRatio"]
