@@ -36,11 +36,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 BASE_DIRECTORY = Path("/Users/woojaejeong/Desktop/Data/USC/DARPA-NEAT/Code/SourceLoc")
-DEFAULT_INPUT = BASE_DIRECTORY / "Results" / "svmDecoding_scout_con_Int.pkl"
+DEFAULT_INPUT = BASE_DIRECTORY / "Results" / "svmDecoding_scout_sent_noBio.pkl"
 DEFAULT_ATLAS = (
     BASE_DIRECTORY.parent.parent / "Data" / "Preprocessed data" / "DKT_scout.mat"
 )
-DEFAULT_OUTPUT = BASE_DIRECTORY / "Results" / "CBP_Chance_scout_con_Int"
+DEFAULT_OUTPUT = BASE_DIRECTORY / "Results" / "CBP_Chance_scout_sent_noBio"
 
 T_START_MS = -200
 T_EPOCH_END_EXCLUSIVE_MS = 1000
@@ -150,10 +150,12 @@ def load_decoder_result(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
     return scores, subject_groups, result
 
 
-def load_scout_labels(path: Path, n_scouts: int) -> list[str]:
+def load_scout_labels(path: Path, n_scouts: int | None = None) -> list[str]:
     atlas = mat73.loadmat(str(path))["DKT_scout"]
     raw_labels = atlas.get("Label", atlas.get("Region"))
-    if raw_labels is None or len(raw_labels) != n_scouts:
+    if raw_labels is None:
+        raise ValueError("Atlas contains no scout labels.")
+    if n_scouts is not None and len(raw_labels) != n_scouts:
         raise ValueError(f"Atlas must contain {n_scouts} scout labels.")
 
     labels = []

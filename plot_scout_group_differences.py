@@ -616,15 +616,46 @@ def main() -> None:
     validate_args(args)
 
     scores, subject_groups, decoder_result = common.load_decoder_result(args.input)
-    n_scouts, n_times, _ = scores.shape
+    n_decoded_scouts, n_times, n_subjects = scores.shape
     times = common.make_time_vector(n_times)
-    scout_labels = common.load_scout_labels(args.atlas, n_scouts)
 
-    scout_indices = list(range(n_scouts)) if args.scouts is None else args.scouts
+    # A decoder run restricted with --scouts stores only those scouts, listed in
+    # its scout_indices. Place them at their atlas positions so labels and
+    # --scouts stay atlas-based; undecoded scouts are NaN and never selected.
+    decoded_scouts = decoder_result.get("scout_indices")
+    if decoded_scouts is None:
+        scout_labels = common.load_scout_labels(args.atlas, n_decoded_scouts)
+        decoded_scouts = list(range(n_decoded_scouts))
+    else:
+        scout_labels = common.load_scout_labels(args.atlas)
+        decoded_scouts = [int(index) for index in np.ravel(decoded_scouts)]
+        if (
+            len(decoded_scouts) != n_decoded_scouts
+            or len(set(decoded_scouts)) != n_decoded_scouts
+        ):
+            raise ValueError(
+                f"Decoder scout_indices ({len(decoded_scouts)} entries) must be "
+                f"unique and match the {n_decoded_scouts} decodeScore scouts."
+            )
+        if min(decoded_scouts) < 0 or max(decoded_scouts) >= len(scout_labels):
+            raise IndexError(
+                f"Decoder scout_indices must be between 0 and "
+                f"{len(scout_labels) - 1}."
+            )
+    n_scouts = len(scout_labels)
+    if decoded_scouts != list(range(n_scouts)):
+        full_scores = np.full((n_scouts, n_times, n_subjects), np.nan)
+        full_scores[decoded_scouts] = scores
+        scores = full_scores
+
+    scout_indices = decoded_scouts if args.scouts is None else args.scouts
     if not scout_indices or len(set(scout_indices)) != len(scout_indices):
         raise ValueError("scouts must contain unique indices and cannot be empty.")
     if min(scout_indices) < 0 or max(scout_indices) >= n_scouts:
         raise IndexError(f"Scout indices must be between 0 and {n_scouts - 1}.")
+    undecoded = sorted(set(scout_indices) - set(decoded_scouts))
+    if undecoded:
+        raise ValueError(f"Scouts {undecoded} are not in the decoder result.")
 
     contrast_definitions = [
         definition
