@@ -53,12 +53,18 @@ import matplotlib.pyplot as plt
 DEFAULT_OUTPUT = common.BASE_DIRECTORY / "Results" / "CBP_GroupDifference_scout_3pc"
 CACHE_VERSION = 2
 
+# (key, label, group1 codes, group2 codes, group1 label, group2 label)
 CONTRAST_DEFINITIONS = (
-    ("control-depressed", "Control - Depressed", 1, 2, "Control", "Depressed"),
-    ("control-suicidal", "Control - Suicidal", 1, 3, "Control", "Suicidal"),
-    ("depressed-suicidal", "Depressed - Suicidal", 2, 3, "Depressed", "Suicidal"),
+    ("control-depressed", "Control - Depressed", (1,), (2,), "Control", "Depressed"),
+    ("control-suicidal", "Control - Suicidal", (1,), (3,), "Control", "Suicidal"),
+    ("depressed-suicidal", "Depressed - Suicidal", (2,), (3,), "Depressed", "Suicidal"),
+    (
+        "control-patients", "Control - Patients (D+S)", (1,), (2, 3),
+        "Control", "Patients (D+S)",
+    ),
 )
 CONTRAST_KEYS = tuple(definition[0] for definition in CONTRAST_DEFINITIONS)
+DEFAULT_CONTRAST_KEYS = ("control-depressed", "control-suicidal", "depressed-suicidal")
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,8 +105,11 @@ def parse_args() -> argparse.Namespace:
         "--contrasts",
         choices=CONTRAST_KEYS,
         nargs="+",
-        default=list(CONTRAST_KEYS),
-        help="Pairwise contrasts to analyze. The default runs all three.",
+        default=list(DEFAULT_CONTRAST_KEYS),
+        help=(
+            "Contrasts to analyze. The default runs the three pairwise contrasts; "
+            "control-patients (Control vs. Depressed + Suicidal) is opt-in."
+        ),
     )
     parser.add_argument(
         "--no-correct-across-contrasts",
@@ -698,13 +707,13 @@ def main() -> None:
         (
             contrast_key,
             contrast_label,
-            group1_code,
-            group2_code,
+            group1_codes,
+            group2_codes,
             group1_label,
             group2_label,
         ) = definition
-        group1_indices = np.flatnonzero(subject_groups == group1_code)
-        group2_indices = np.flatnonzero(subject_groups == group2_code)
+        group1_indices = np.flatnonzero(np.isin(subject_groups, group1_codes))
+        group2_indices = np.flatnonzero(np.isin(subject_groups, group2_codes))
         if group1_indices.size < 2 or group2_indices.size < 2:
             raise ValueError(f"Contrast {contrast_label} has fewer than two subjects.")
 

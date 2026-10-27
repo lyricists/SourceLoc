@@ -3,8 +3,9 @@
 Each group-average source-response map (vertex x time) from
 source_response_norm.py is masked with the same group's one-sample
 decoding-vs-chance CBP result: a scout's vertices keep their response at the
-scout's significant time points and are zero elsewhere. Vertices outside every
-DKT scout are zero.
+scout's significant time points and are zero elsewhere. These masks require
+cluster p-values corrected across Control, Depressed, and Suicidal. Vertices
+outside every DKT scout are zero.
 
 """
 
@@ -20,11 +21,11 @@ from pathlib import Path
 import mat73
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # SourceLoc; this script lives in Exp/
 RESULTS = ROOT / "Results"
 DATA = ROOT.parent.parent / "Data"
 
-VERSION = 1
+VERSION = 2
 # Source-response group prefix -> CBP group key.
 GROUPS = {"c": "control", "d": "depressed", "s": "suicidal"}
 # CBP task -> source-response conditions decoded by that task.
@@ -42,12 +43,13 @@ def parse_args() -> argparse.Namespace:
         default=RESULTS / "source_response_norm" / "evoked_baseline-zscore",
     )
     parser.add_argument(
-        "--intention-cbp-dir", type=Path, default=RESULTS / "CBP_Chance_scout_con_Int"
+        "--intention-cbp-dir", type=Path,
+        default=RESULTS / "CBP_Chance_scout_con_Int_3group_corrected"
     )
     parser.add_argument(
         "--sentiment-cbp-dir",
         type=Path,
-        default=RESULTS / "CBP_Chance_scout_sent_noBio",
+        default=RESULTS / "CBP_Chance_scout_sent_noBio_3group_corrected",
     )
     parser.add_argument(
         "--atlas", type=Path, default=DATA / "Preprocessed data" / "DKT_scout.mat"
@@ -56,7 +58,7 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=None,
-        help="Default: '<source-dir>_significant' next to the source directory.",
+        help="Default: '<source-dir>_significant_3group_corrected' next to the source directory.",
     )
     return parser.parse_args()
 
@@ -137,6 +139,10 @@ def load_scout_mask(
 ) -> tuple[np.ndarray, dict]:
     """Return a time x atlas-scout significance mask from one CBP result."""
     statistics = load_pickle(path)
+    test = statistics.get("test", {})
+    if (tuple(test.get("group_family", ())) != ("control", "depressed", "suicidal")
+            or test.get("group_correction_factor") != 3):
+        raise ValueError(f"{path.name}: expected significance corrected across all three diagnostic groups.")
     cbp_times = np.asarray(statistics["times_ms"], dtype=np.float64)
     if cbp_times.shape != times_ms.shape or not np.allclose(cbp_times, times_ms):
         raise ValueError(f"{path.name}: CBP time vector differs from the source maps.")
@@ -163,7 +169,8 @@ def load_scout_mask(
     mask[:, scout_indices] = significant
     info = {
         "statistics": file_signature(path),
-        "cluster_alpha": float(statistics["test"]["cluster_alpha"]),
+        "cluster_alpha": float(test["cluster_alpha"]),
+        "group_correction_factor": int(test["group_correction_factor"]),
         "n_subjects": int(statistics["n_subjects"]),
         "tested_scout_indices": scout_indices.tolist(),
         "n_significant_scouts": int(mask.any(axis=0).sum()),
@@ -186,7 +193,7 @@ def mask_response(
 def run(args: argparse.Namespace) -> None:
     source_dir = args.source_dir
     output_dir = args.output_dir or source_dir.with_name(
-        source_dir.name + "_significant"
+        source_dir.name + "_significant_3group_corrected"
     )
     if output_dir.resolve() == source_dir.resolve():
         raise ValueError("Output directory must differ from the source directory.")

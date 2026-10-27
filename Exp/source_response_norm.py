@@ -20,7 +20,7 @@ import mat73
 import numpy as np
 from threadpoolctl import threadpool_limits
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # SourceLoc; this script lives in Exp/
 DATA = ROOT.parent.parent / "Data"
 PREPROCESSED = DATA / "Preprocessed data"
 BEHAVIOR = DATA / "Behavior"

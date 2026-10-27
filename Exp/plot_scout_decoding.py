@@ -1,9 +1,11 @@
 """Plot scout-wise decoding with joint scout-by-time cluster inference.
 
-Each requested group is analyzed with one one-tailed, one-sample
+Each diagnostic group is analyzed with one one-tailed, one-sample
 spatiotemporal cluster permutation test on accuracy minus 50% chance. The
 maximum-cluster null distribution controls family-wise error jointly across
-all selected scouts and time points within that group.
+all selected scouts and time points within that group. Cluster p-values are
+then Bonferroni-corrected across the three diagnostic groups (Control,
+Depressed, and Suicidal). The combined-subject All panel is not tested.
 
 """
 
@@ -40,22 +42,22 @@ DEFAULT_INPUT = BASE_DIRECTORY / "Results" / "svmDecoding_scout_sent_noBio.pkl"
 DEFAULT_ATLAS = (
     BASE_DIRECTORY.parent.parent / "Data" / "Preprocessed data" / "DKT_scout.mat"
 )
-DEFAULT_OUTPUT = BASE_DIRECTORY / "Results" / "CBP_Chance_scout_sent_noBio"
+DEFAULT_OUTPUT = BASE_DIRECTORY / "Results" / "CBP_Chance_scout_sent_noBio_3group_corrected"
 
 T_START_MS = -200
 T_EPOCH_END_EXCLUSIVE_MS = 1000
 SAMPLING_RATE_HZ = 250
 T_END_MS = T_EPOCH_END_EXCLUSIVE_MS - 1000 / SAMPLING_RATE_HZ
 CHANCE_LEVEL = 0.5
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 GROUP_DEFINITIONS = (
-    ("all", "All", None),
     ("control", "Control", 1),
     ("depressed", "Depressed", 2),
     ("suicidal", "Suicidal", 3),
 )
 GROUP_KEYS = tuple(definition[0] for definition in GROUP_DEFINITIONS)
+GROUP_CORRECTION_FACTOR = len(GROUP_DEFINITIONS)
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +65,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--atlas", type=Path, default=DEFAULT_ATLAS)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--reuse-uncorrected-dir", type=Path, default=None,
+        help="Reuse matching version-4 permutation caches and apply the three-group correction without rerunning permutations.",
+    )
+    parser.add_argument(
+        "--reuse-only", action="store_true",
+        help="Require matching existing permutations; never start a new permutation test.",
+    )
     parser.add_argument("--n-permutations", type=int, default=10_000)
     parser.add_argument("--threshold-p", type=float, default=0.05)
     parser.add_argument("--cluster-alpha", type=float, default=0.05)
@@ -97,7 +107,7 @@ def parse_args() -> argparse.Namespace:
         choices=GROUP_KEYS,
         nargs="+",
         default=list(GROUP_KEYS),
-        help="Groups to analyze. The default analyzes all listed groups.",
+        help="Diagnostic groups to analyze. Correction always covers all three groups.",
     )
     parser.add_argument(
         "--scout-adjacency",
@@ -299,6 +309,8 @@ def make_cache_signature(
         "first_time_ms": float(times[0]),
         "last_time_ms": float(times[-1]),
         "chance_level": CHANCE_LEVEL,
+        "group_family": GROUP_KEYS,
+        "group_correction_factor": GROUP_CORRECTION_FACTOR,
         "n_permutations": int(args.n_permutations),
         "threshold_p": float(args.threshold_p),
         "cluster_alpha": float(args.cluster_alpha),
@@ -357,8 +369,13 @@ def compute_group_statistics(
     significant_mask = np.zeros(expected_shape, dtype=bool)
     significant_clusters = []
 
-    for cluster_index, (cluster, p_value) in enumerate(zip(clusters, cluster_p_values)):
-        if p_value >= args.cluster_alpha:
+    adjusted_cluster_p_values = np.minimum(
+        1.0, np.asarray(cluster_p_values, dtype=np.float64) * GROUP_CORRECTION_FACTOR
+    )
+    for cluster_index, (cluster, raw_p_value, adjusted_p_value) in enumerate(
+        zip(clusters, cluster_p_values, adjusted_cluster_p_values)
+    ):
+        if adjusted_p_value >= args.cluster_alpha:
             continue
         mask = cluster_to_mask(cluster, expected_shape)
         significant_mask |= mask
@@ -369,7 +386,8 @@ def compute_group_statistics(
                 "cluster_index": int(cluster_index),
                 "cluster_number": int(cluster_index + 1),
                 "mask": mask,
-                "p_value": float(p_value),
+                "raw_p_value": float(raw_p_value),
+                "adjusted_p_value": float(adjusted_p_value),
                 "cluster_mass": float(np.asarray(t_observed)[mask].sum()),
                 "n_points": int(mask.sum()),
                 "n_scouts": int(local_scout_positions.size),
@@ -399,6 +417,7 @@ def compute_group_statistics(
         "t_observed": np.asarray(t_observed),
         "n_clusters_tested": int(len(clusters)),
         "cluster_p_values": np.asarray(cluster_p_values),
+        "adjusted_cluster_p_values": adjusted_cluster_p_values,
         "significant_mask": significant_mask,
         "significant_clusters": significant_clusters,
         "null_distribution": np.asarray(null_distribution),
@@ -410,6 +429,9 @@ def compute_group_statistics(
             "threshold_p": args.threshold_p,
             "cluster_forming_t": threshold,
             "cluster_alpha": args.cluster_alpha,
+            "group_family": GROUP_KEYS,
+            "group_correction": "Bonferroni across Control, Depressed, and Suicidal",
+            "group_correction_factor": GROUP_CORRECTION_FACTOR,
             "seed": args.seed,
             "n_jobs": args.n_jobs,
             "buffer_size": args.buffer_size,
@@ -417,31 +439,103 @@ def compute_group_statistics(
             "adjacency": adjacency_description,
             "spatial_edge_count": int(adjacency.nnz // 2),
             "correction_scope": (
-                "all selected scouts and time points within this group; "
-                "no correction across groups"
+                "all selected scouts and time points within each group; "
+                "Bonferroni across the three diagnostic groups"
             ),
         },
     }
 
 
+def reuse_uncorrected_group(
+    path: Path, cache_signature: dict, cluster_alpha: float
+) -> dict | None:
+    """Apply the stricter group correction to matching legacy permutation results."""
+    if not path.exists():
+        return None
+    with open(path, "rb") as file:
+        statistics = pickle.load(file)
+    legacy_signature = {
+        key: value for key, value in cache_signature.items()
+        if key not in ("group_family", "group_correction_factor")
+    }
+    legacy_signature["cache_version"] = 4
+    if statistics.get("cache_signature") != legacy_signature:
+        print(f"Cannot reuse incompatible permutation cache: {path}")
+        return None
+
+    raw_p_values = np.asarray(statistics["cluster_p_values"], dtype=np.float64)
+    adjusted_p_values = np.minimum(1.0, raw_p_values * GROUP_CORRECTION_FACTOR)
+    significant_mask = np.zeros_like(statistics["significant_mask"], dtype=bool)
+    significant_clusters = []
+    for old_cluster in statistics["significant_clusters"]:
+        cluster_index = old_cluster["cluster_index"]
+        raw_p_value = float(raw_p_values[cluster_index])
+        if not np.isclose(raw_p_value, old_cluster["p_value"]):
+            raise ValueError(f"Inconsistent cached cluster p-value in {path}")
+        adjusted_p_value = float(adjusted_p_values[cluster_index])
+        if adjusted_p_value >= cluster_alpha:
+            continue
+        cluster = dict(old_cluster)
+        cluster.pop("p_value")
+        cluster["raw_p_value"] = raw_p_value
+        cluster["adjusted_p_value"] = adjusted_p_value
+        significant_clusters.append(cluster)
+        significant_mask |= cluster["mask"]
+    eligible_indices = set(np.flatnonzero(adjusted_p_values < cluster_alpha))
+    cached_indices = {cluster["cluster_index"] for cluster in significant_clusters}
+    if cached_indices != eligible_indices:
+        raise ValueError(f"Legacy cache omits a cluster needed after correction: {path}")
+
+    statistics["cache_signature"] = cache_signature
+    statistics["adjusted_cluster_p_values"] = adjusted_p_values
+    statistics["significant_mask"] = significant_mask
+    statistics["significant_clusters"] = significant_clusters
+    test = dict(statistics["test"])
+    test.update({
+        "group_family": GROUP_KEYS,
+        "group_correction": "Bonferroni across Control, Depressed, and Suicidal",
+        "group_correction_factor": GROUP_CORRECTION_FACTOR,
+        "correction_scope": (
+            "all selected scouts and time points within each group; "
+            "Bonferroni across the three diagnostic groups"
+        ),
+        "raw_statistics_reused_from": str(path.resolve()),
+    })
+    statistics["test"] = test
+    return statistics
+
+
 def load_or_compute_group(
     cache_path: Path,
     cache_signature: dict,
+    uncorrected_cache_path: Path | None = None,
+    reuse_only: bool = False,
     **compute_kwargs: object,
-) -> tuple[dict, bool]:
+) -> tuple[dict, str]:
     if cache_path.exists():
         with open(cache_path, "rb") as file:
             cached = pickle.load(file)
         if cached.get("cache_signature") == cache_signature:
-            return cached, True
+            return cached, "cache"
         print(f"Ignoring incompatible statistics cache: {cache_path}")
+
+    if uncorrected_cache_path is not None:
+        reused = reuse_uncorrected_group(
+            uncorrected_cache_path, cache_signature,
+            float(compute_kwargs["args"].cluster_alpha),
+        )
+        if reused is not None:
+            atomic_pickle_dump(reused, cache_path)
+            return reused, "reused existing permutations"
+    if reuse_only:
+        raise ValueError(f"No matching permutation cache for {cache_path.name}")
 
     statistics = compute_group_statistics(
         cache_signature=cache_signature,
         **compute_kwargs,
     )
     atomic_pickle_dump(statistics, cache_path)
-    return statistics, False
+    return statistics, "computed"
 
 
 def write_cluster_summary(
@@ -451,7 +545,8 @@ def write_cluster_summary(
         "group",
         "n_subjects",
         "cluster_number",
-        "cluster_p_value",
+        "raw_cluster_p_value",
+        "group_adjusted_p_value",
         "cluster_mass",
         "cluster_n_points",
         "cluster_n_scouts",
@@ -480,7 +575,8 @@ def write_cluster_summary(
                                 "group": statistics["group_label"],
                                 "n_subjects": statistics["n_subjects"],
                                 "cluster_number": cluster["cluster_number"],
-                                "cluster_p_value": cluster["p_value"],
+                                "raw_cluster_p_value": cluster["raw_p_value"],
+                                "group_adjusted_p_value": cluster["adjusted_p_value"],
                                 "cluster_mass": cluster["cluster_mass"],
                                 "cluster_n_points": cluster["n_points"],
                                 "cluster_n_scouts": cluster["n_scouts"],
@@ -515,7 +611,7 @@ def plot_significant_intervals(
 
 def create_multipage_figure(
     statistics_by_group: dict[str, dict],
-    group_definitions: list[tuple[str, str, int | None]],
+    group_definitions: list[tuple[str, str, int]],
     scout_indices: list[int],
     scout_labels: list[str],
     destination: Path,
@@ -616,8 +712,8 @@ def create_multipage_figure(
                         axis.set_xlabel("Time from stimulus onset (ms)", fontsize=11)
 
             figure.suptitle(
-                "Scout-wise sentiment decoding\n"
-                "Mean ± SEM; red bars: cluster-level p < 0.05 vs 50%",
+                "Scout-wise decoding by diagnostic group\n"
+                "Mean ± SEM; red bars: group-adjusted cluster p < 0.05 vs 50%",
                 fontsize=17,
                 fontweight="bold",
                 y=0.998,
@@ -625,8 +721,8 @@ def create_multipage_figure(
             figure.text(
                 0.5,
                 0.004,
-                "Family-wise correction is joint across selected scouts and time "
-                "within each group; there is no correction across groups.",
+                "Cluster permutation correction spans selected scouts and time; "
+                "Bonferroni correction spans Control, Depressed, and Suicidal (3 tests).",
                 ha="center",
                 fontsize=9,
             )
@@ -651,6 +747,8 @@ def create_multipage_figure(
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.reuse_only and args.reuse_uncorrected_dir is None:
+        raise ValueError("--reuse-only requires --reuse-uncorrected-dir.")
     if args.n_permutations < 2:
         raise ValueError("n-permutations must be at least 2.")
     if not 0 < args.threshold_p < 0.5:
@@ -687,11 +785,7 @@ def main() -> None:
     ]
     group_indices = {}
     for group_key, _, group_code in group_definitions:
-        indices = (
-            np.arange(n_subjects)
-            if group_code is None
-            else np.flatnonzero(subject_groups == group_code)
-        )
+        indices = np.flatnonzero(subject_groups == group_code)
         if indices.size < 2:
             raise ValueError(f"Group {group_key} has fewer than two subjects.")
         group_indices[group_key] = indices
@@ -718,12 +812,14 @@ def main() -> None:
         f"Testing {len(scout_indices)} scouts jointly with "
         f"{args.n_permutations} permutations per group"
     )
+    print("Cluster p-values are Bonferroni-corrected across the three diagnostic groups")
     print(f"Scout adjacency: {adjacency_description}")
     print(f"Spatial edges: {adjacency.nnz // 2}; permutation workers: {args.n_jobs}")
 
     statistics_by_group = {}
     loaded_count = 0
     computed_count = 0
+    updated_count = 0
     selection_digest = hashlib.sha256(
         np.asarray(scout_indices, dtype=np.int64).tobytes()
     ).hexdigest()[:12]
@@ -743,9 +839,16 @@ def main() -> None:
             statistics_directory / f"group_{group_key}_scouts_{selection_digest}.pkl"
         )
         print(f"Analyzing {group_label} (n={subject_indices.size})...")
-        statistics, loaded = load_or_compute_group(
+        uncorrected_cache_path = (
+            args.reuse_uncorrected_dir / "spatiotemporal_statistics" /
+            f"group_{group_key}_scouts_{selection_digest}.pkl"
+            if args.reuse_uncorrected_dir is not None else None
+        )
+        statistics, source = load_or_compute_group(
             cache_path=cache_path,
             cache_signature=cache_signature,
+            uncorrected_cache_path=uncorrected_cache_path,
+            reuse_only=args.reuse_only,
             selected_scores=selected_scores,
             times=times,
             scout_indices=scout_indices,
@@ -758,9 +861,9 @@ def main() -> None:
             args=args,
         )
         statistics_by_group[group_key] = statistics
-        loaded_count += int(loaded)
-        computed_count += int(not loaded)
-        source = "cache" if loaded else "computed"
+        loaded_count += int(source != "computed")
+        computed_count += int(source == "computed")
+        updated_count += int(source != "cache")
         print(
             f"  {source}; significant clusters: "
             f"{len(statistics['significant_clusters'])}"
@@ -769,7 +872,7 @@ def main() -> None:
     summary_path = args.output_dir / "cluster_summary.csv"
     write_cluster_summary(statistics_by_group, summary_path)
 
-    figure_path = args.output_dir / "scout_decoding_all_groups.pdf"
+    figure_path = args.output_dir / "scout_decoding_three_groups.pdf"
     create_multipage_figure(
         statistics_by_group=statistics_by_group,
         group_definitions=group_definitions,
@@ -777,7 +880,7 @@ def main() -> None:
         scout_labels=scout_labels,
         destination=figure_path,
         rows_per_page=args.rows_per_page,
-        rebuild=args.rebuild_figure or computed_count > 0,
+        rebuild=args.rebuild_figure or updated_count > 0,
     )
 
     metadata = {
@@ -799,6 +902,9 @@ def main() -> None:
             "n_permutations": args.n_permutations,
             "threshold_p": args.threshold_p,
             "cluster_alpha": args.cluster_alpha,
+            "group_family": GROUP_KEYS,
+            "group_correction": "Bonferroni across Control, Depressed, and Suicidal",
+            "group_correction_factor": GROUP_CORRECTION_FACTOR,
             "tail": 1,
             "seed": args.seed,
             "n_jobs": args.n_jobs,
@@ -807,7 +913,7 @@ def main() -> None:
             "spatial_edge_count": int(adjacency.nnz // 2),
             "correction_scope": (
                 "all selected scouts and time points within each group; "
-                "no correction across groups"
+                "Bonferroni across the three diagnostic groups"
             ),
         },
     }
@@ -821,7 +927,7 @@ def main() -> None:
         len(statistics["significant_clusters"])
         for statistics in statistics_by_group.values()
     )
-    print(f"Group caches loaded: {loaded_count}")
+    print(f"Group caches loaded or reused: {loaded_count}")
     print(f"Group tests computed: {computed_count}")
     print(
         "Scout/group panels containing significance: "
